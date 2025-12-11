@@ -1,86 +1,125 @@
 # Assistance for the Blind - MQTT Vision Pipeline
 
-這裡提供最小可行的程式骨架，透過 MQTT 串接攝影機、YOLOv3-tiny 偵測、危險警示：
+English | [中文](#中文說明)
 
-- `assist/cam/raw`：來源影像 (JPEG base64)
-- `assist/cam/annotated`：畫框後影像 (選用，環境變數 `PUBLISH_ANN=1`)
-- `assist/detections`：偵測清單 (含距離、方位)
-- `assist/alerts`：精簡危險提示 (給語音/震動)
+## Overview
+Publish camera/video frames, run YOLOv8 detection, send annotated images and human-friendly messages over MQTT. Text outputs are available in both English and Chinese, plus short “nearest object” sentences for TTS.
 
-## 安裝
+## Features
+- JPEG frames → MQTT (`assist/cam/raw` by default or `ntut/SourceImage` for data-URL only)
+- YOLOv8 detection with per-class colors
+- Annotated image out as data URL (`ntut/ProcessImage`)
+- Text summaries (EN/ZH) and nearest-object speech text (EN/ZH)
+- Metadata separated from image payloads (e.g., `ntut/SourceMeta`)
+
+## MQTT Topics (current defaults)
+- Input:
+  - `ntut/SourceImage`: data URL string of the raw JPEG (from camera_pub/video_pub)
+  - `ntut/SourceMeta`: JSON metadata for the raw frame (ts, w, h, frame_id, encoding, data as base64)
+- Detector outputs:
+  - `assist/detections`: JSON of all detections
+  - `ntut/ProcessImage`: annotated image as data URL
+  - `ntut/ProcessInfoZh`: Chinese text summary of all detections
+  - `ntut/ProcessInfoEn`: English text summary of all detections
+  - `ntut/ProcessSpeechZh`: Chinese sentence for the nearest object (for TTS)
+  - `ntut/ProcessSpeechEn`: English sentence for the nearest object (for TTS)
+  - (Optional) `assist/cam/annotated` when `PUBLISH_ANN=1`
+
+## Quick start
 ```bash
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## 準備 YOLOv3-tiny 權重
-下載官方檔案並放到 `models/`：
+### Publish video or camera
+```powershell
+$env:MQTT_BROKER="jetsion.com"
+$env:MQTT_PORT="1883"
+$env:TOPIC_RAW_ALT="ntut/SourceImage"   # image as data URL
+$env:TOPIC_RAW_ALT_META="ntut/SourceMeta"  # metadata JSON
+python video_pub.py   # or python camera_pub.py
 ```
-models/yolov3-tiny.cfg
-models/yolov3-tiny.weights
-models/coco.names
-```
-可由 https://pjreddie.com/darknet/yolo/ 取得。若路徑不同，可用環境變數 `YOLO_CFG`, `YOLO_WEIGHTS`, `YOLO_NAMES` 指定。
+Useful vars: `VIDEO_PATH`, `SLEEP_SEC`, `LOOP_VIDEO`, `FRAME_ID`, `CAM_INDEX`, `CAM_WIDTH`, `CAM_HEIGHT`, `CAM_FPS`.
 
-## 執行流程
-開三個終端機 (或用 tmux)：
-
-1) 發佈攝影機影像
-```bash
-set MQTT_BROKER=jetsion.com
-python camera_pub.py
-```
-環境參數：
-- `CAM_INDEX` (預設 0)、`CAM_WIDTH`/`CAM_HEIGHT`、`CAM_FPS`、`FRAME_ID`
-
-若要用影片模擬攝影機、每 10 秒送一張：
-```bash
-set MQTT_BROKER=jetsion.com
-set VIDEO_PATH=14881231_3840_2160_24fps.mp4
-set SLEEP_SEC=10   # 發布間隔秒數
-python video_pub.py
-```
-環境參數：
-- `VIDEO_PATH`：影片路徑
-- `SLEEP_SEC`：每張影像的發布間隔（牆鐘時間）
-- `LOOP_VIDEO`：預設 1，播完重頭；設為 0 到尾即停
-- `FRAME_ID`、`JPEG_QUALITY`、`TOPIC_RAW`
-
-2) 偵測節點（YOLOv8，預設 yolov8n.pt）
-```bash
-set MQTT_BROKER=jetsion.com
-set PUBLISH_ANN=1
+### Run detector
+```powershell
+$env:MQTT_BROKER="jetsion.com"
+$env:MQTT_PORT="1883"
+$env:TOPIC_RAW="ntut/SourceImage"
+$env:TOPIC_ANN_ALT="ntut/ProcessImage"
+$env:TOPIC_INFO_ZH="ntut/ProcessInfoZh"
+$env:TOPIC_INFO_EN="ntut/ProcessInfoEn"
+$env:TOPIC_SPEECH_ZH="ntut/ProcessSpeechZh"
+$env:TOPIC_SPEECH_EN="ntut/ProcessSpeechEn"
+$env:PUBLISH_ANN="1"   # if you also want assist/cam/annotated
 python detector.py
 ```
-環境參數：
-- `YOLO_MODEL`：預設 `yolov8n.pt`（可換 yolov8s.pt 或自行訓練的 .pt）
-- `CONF_THRESH` (預設 0.25)、`FOCAL_PX` (依相機校正)、`OBJ_HEIGHT_M` (預設 1.6m)
-- `TOPIC_RAW`/`TOPIC_DET`/`TOPIC_ANN`
+Useful vars: `YOLO_MODEL` (default `yolov8n.pt`), `CONF_THRESH`, `FOCAL_PX`, `OBJ_HEIGHT_M`.
 
-3) 危險提示節點
-```bash
-set MQTT_BROKER=jetsion.com
-python alerts_node.py
+## File roles
+- `video_pub.py` / `camera_pub.py`: publish frames; data URL to `ntut/SourceImage`, metadata to `ntut/SourceMeta`.
+- `detector.py`: YOLOv8 inference, annotated images to `ntut/ProcessImage`, detection JSON to `assist/detections`, text to `ntut/ProcessInfoZh/En`, nearest-object speech text to `ntut/ProcessSpeechZh/En`.
+- `alerts_node.py` / `testToMQTT.py`: auxiliary MQTT tools.
+
+## Ignore list
+`.gitignore` excludes `.venv/`, pycache, `.pt`, `.mp4`, logs, etc. Keep large weights/videos out of git.
+
+---
+
+## 中文說明
+
+### 簡介
+透過 MQTT 發佈相機/影片影格，YOLOv8 偵測後輸出標註圖片、中文/英文文字摘要，以及最近物件的語音提示句。
+
+### 功能
+- JPEG 影格發佈；`ntut/SourceImage` 只送 data URL 圖片，`ntut/SourceMeta` 分送中繼資料
+- YOLOv8 偵測，類別顏色區分
+- 標註圖以 data URL 發到 `ntut/ProcessImage`
+- 偵測摘要文字：中文 `ntut/ProcessInfoZh`、英文 `ntut/ProcessInfoEn`
+- 最近物件語音句：中文 `ntut/ProcessSpeechZh`、英文 `ntut/ProcessSpeechEn`
+
+### MQTT 主題（預設）
+- 輸入：`ntut/SourceImage`（圖片 data URL）、`ntut/SourceMeta`（JSON 中繼資料）
+- 偵測輸出：`assist/detections`（JSON）、`ntut/ProcessImage`（標註圖 data URL）、`ntut/ProcessInfoZh` / `ntut/ProcessInfoEn`（摘要文字）、`ntut/ProcessSpeechZh` / `ntut/ProcessSpeechEn`（最近物件語音句）
+- 若 `PUBLISH_ANN=1`：同時發 `assist/cam/annotated`
+
+### 快速啟動
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
 ```
-環境參數：
-- `ALERT_DIST_M` (預設 2.5m)、`SUPPRESS_MS` (預設 800ms 節流)
-- `IMPORTANT_CLASSES` (逗號分隔，預設 person,car,bus,truck,bicycle,motorbike)
 
-## 節點說明
-- `camera_pub.py`：抓攝影機影像、JPEG、base64，上傳到 `assist/cam/raw`
-- `detector.py`：YOLOv3-tiny 推論，發布 `assist/detections`，可選擇發布 `assist/cam/annotated`
-- `alerts_node.py`：從偵測結果挑最近的重要類別，產生 `assist/alerts`（level/reason/side/dist_m/action）
+發佈端（影片/相機）：
+```powershell
+$env:MQTT_BROKER="jetsion.com"
+$env:MQTT_PORT="1883"
+$env:TOPIC_RAW_ALT="ntut/SourceImage"
+$env:TOPIC_RAW_ALT_META="ntut/SourceMeta"
+python video_pub.py   # 或 python camera_pub.py
+```
 
-## 診斷與調教
-- FOCAL_PX 校正：用已知高度的物體 (如 1.6m) 站在已知距離 d，量測 bbox 像素高度 h，`focal_px = d * h / H_real`
-- 若頻寬吃緊，降低 `CAM_FPS` 或 JPEG 品質（在 `camera_pub.py` 內可調 IMWRITE_JPEG_QUALITY）
-- 若要壓低延遲，可將 MQTT QoS 調為 0（影像類別）
+偵測端：
+```powershell
+$env:MQTT_BROKER="jetsion.com"
+$env:MQTT_PORT="1883"
+$env:TOPIC_RAW="ntut/SourceImage"
+$env:TOPIC_ANN_ALT="ntut/ProcessImage"
+$env:TOPIC_INFO_ZH="ntut/ProcessInfoZh"
+$env:TOPIC_INFO_EN="ntut/ProcessInfoEn"
+$env:TOPIC_SPEECH_ZH="ntut/ProcessSpeechZh"
+$env:TOPIC_SPEECH_EN="ntut/ProcessSpeechEn"
+$env:PUBLISH_ANN="1"
+python detector.py
+```
 
-## 安全與隱私
-- 若影像含個資，盡量使用本地 broker；或僅傳送偵測結果 (`assist/detections`/`assist/alerts`)
+常用變數：`VIDEO_PATH`、`SLEEP_SEC`、`FRAME_ID`、`CAM_INDEX`/`CAM_WIDTH`/`CAM_HEIGHT`/`CAM_FPS`、`YOLO_MODEL`、`CONF_THRESH`、`FOCAL_PX`、`OBJ_HEIGHT_M`。
 
-## 待辦/可擴充
-- 加入語音/TTS 節點訂閱 `assist/alerts`
-- 支援雙鏡頭或深度資訊，以提高距離估計可靠度
-- 將 `FOCAL_PX`/`OBJ_HEIGHT_M` 配置化 (retain 至 `assist/config`) 供遠端更新
+### 檔案說明
+- `video_pub.py` / `camera_pub.py`：發佈影格；`ntut/SourceImage` 為 data URL 圖，`ntut/SourceMeta` 為中繼資料 JSON。
+- `detector.py`：YOLOv8 偵測，輸出標註圖與文字/語音描述。
+- 其餘為輔助 MQTT 範例工具。
+
+### Git 忽略
+`.gitignore` 已排除 `.venv/`、暫存檔、`.pt`、`.mp4` 等大型檔案，避免推上遠端。
