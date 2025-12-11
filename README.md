@@ -62,6 +62,13 @@ Useful vars: `YOLO_MODEL` (default `yolov8n.pt`), `CONF_THRESH`, `FOCAL_PX`, `OB
 - `detector.py`: YOLOv8 inference, annotated images to `ntut/ProcessImage`, detection JSON to `assist/detections`, text to `ntut/ProcessInfoZh/En`, nearest-object speech text to `ntut/ProcessSpeechZh/En`.
 - `alerts_node.py` / `testToMQTT.py`: auxiliary MQTT tools.
 
+## Stack (current usage)
+- Software: Python 3.9+, OpenCV, paho-mqtt, Ultralytics YOLOv8, NumPy; Django platform subscribes to MQTT and renders UI (live/processed images, multilingual text, speech).
+- Firmware/Devices: ESP32-CAM for live image publish to MQTT; optionally video files for simulation.
+- Messaging: MQTT broker (tested `jetsion.com:1883`), topics listed above.
+- Platform: Django-based web front-end subscribing to MQTT to show raw/processed streams, text summaries (multi-language), and play speech prompts.
+- Optional media: `.mp4` clips used for simulation; YOLO weight `.pt` files.
+
 ## Ignore list
 `.gitignore` excludes `.venv/`, pycache, `.pt`, `.mp4`, logs, etc. Keep large weights/videos out of git.
 
@@ -120,6 +127,13 @@ python detector.py
 - `video_pub.py` / `camera_pub.py`：發佈影格；`ntut/SourceImage` 為 data URL 圖，`ntut/SourceMeta` 為中繼資料 JSON。
 - `detector.py`：YOLOv8 偵測，輸出標註圖與文字/語音描述。
 - 其餘為輔助 MQTT 範例工具。
+
+### 軟硬體/平台
+- 軟體：Python 3.9+、OpenCV、paho-mqtt、Ultralytics YOLOv8、NumPy；Django 物聯網平台訂閱 MQTT，顯示即時/處理後影像、多國語文字描述並播放語音。
+- 硬體/韌體：ESP32-CAM 作為即時影像傳輸到 MQTT；亦可用影片檔模擬。
+- 通訊：MQTT broker（測試 `jetsion.com:1883`），主題同上。
+- 平台：Django 架構的前端訂閱 MQTT，呈現原始/標註影像、中文/英文解析文字與語音播放。
+- 媒體：`.mp4` 影片用於模擬；YOLO `.pt` 權重檔。
 
 ### Git 忽略
 `.gitignore` 已排除 `.venv/`、暫存檔、`.pt`、`.mp4` 等大型檔案，避免推上遠端。
