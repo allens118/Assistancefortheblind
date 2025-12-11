@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+*.log
+*.tmp
+*.cache/
+*.egg-info/
+.DS_Store
+*.pt
+*.mp4
