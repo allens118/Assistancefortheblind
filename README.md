@@ -3,7 +3,7 @@
 English | [中文](#中文說明)
 
 ## Overview
-Publish camera/video frames, run YOLOv8 detection, send annotated images and human-friendly messages over MQTT. Text outputs are available in both English and Chinese, plus short “nearest object” sentences for TTS.
+This project builds an AIoT-based assistive vision pipeline. It captures camera/video frames via MQTT, runs YOLOv8 to detect objects, and simulates assistive responses: annotated images, multilingual summaries, and speech-friendly nearest-object cues. It enables real-time analysis and interaction-oriented feedback for accessibility scenarios.
 
 ## Features
 - JPEG frames → MQTT (`assist/cam/raw` by default or `ntut/SourceImage` for data-URL only)
@@ -70,7 +70,7 @@ Useful vars: `YOLO_MODEL` (default `yolov8n.pt`), `CONF_THRESH`, `FOCAL_PX`, `OB
 ## 中文說明
 
 ### 簡介
-透過 MQTT 發佈相機/影片影格，YOLOv8 偵測後輸出標註圖片、中文/英文文字摘要，以及最近物件的語音提示句。
+本專案是一套 AIoT 式的助盲視覺管線：透過 MQTT 收集相機/影片影格，使用 YOLOv8 即時偵測，並輸出標註圖片、多語摘要與最近物件的語音化提示，模擬不同場景下的輔助回饋。
 
 ### 功能
 - JPEG 影格發佈；`ntut/SourceImage` 只送 data URL 圖片，`ntut/SourceMeta` 分送中繼資料
