@@ -1,11 +1,8 @@
 """
-Detector node (YOLOv8):
-- Subscribes to assist/cam/raw (JPEG base64 or data URL)
-- Runs YOLOv8 (default yolov8n.pt) via Ultralytics
-- Publishes detections to assist/detections (JSON)
-- Publishes annotated JPEGs to ntut/ProcessImage (data URL only)
-- Publishes detection text to ntut/ProcessInfoZh / ntut/ProcessInfoEn
-- Publishes nearest-object text (for TTS) to ntut/ProcessSpeechZh / ntut/ProcessSpeechEn
+Fruit detector node (YOLOv8):
+- Subscribes to camera MQTT topics (base64 JPEG string or data URL)
+- Detects fruit classes and estimates distance
+- Publishes detections to MQTT (JSON) and optional annotated JPEG/data URL
 """
 
 import base64
@@ -18,17 +15,15 @@ import cv2
 import numpy as np
 from paho.mqtt import client as mqtt
 from ultralytics import YOLO
-import torch
 
-# Allow safe unpickling for ultralytics DetectionModel on newer torch versions (2.6+)
+# Safe unpickling for newer torch versions; ignore if unavailable
 try:
     from torch.serialization import add_safe_globals
     from ultralytics.nn.tasks import DetectionModel
 
     add_safe_globals([DetectionModel])
-except Exception as e:
-    # Older torch versions may not have add_safe_globals; proceed silently.
-    print(f"Safe globals registration skipped: {e}")
+except Exception:
+    pass
 
 
 BROKER = os.getenv("MQTT_BROKER", "localhost")
@@ -36,100 +31,45 @@ PORT = int(os.getenv("MQTT_PORT", "1883"))
 USERNAME = os.getenv("MQTT_USER")
 PASSWORD = os.getenv("MQTT_PASS")
 USE_TLS = os.getenv("MQTT_TLS", "0") == "1"
-TOPIC_RAW = os.getenv("TOPIC_RAW", "assist/cam/raw")
-TOPIC_RAW_ESP = os.getenv("TOPIC_RAW_ESP", "ntut/CAM/SourceImage")  # ESP32 direct publish topic
-RELAY_RAW_TOPIC = os.getenv("RELAY_RAW_TOPIC", TOPIC_RAW)  # where to forward ESP raw frames after processing
-TOPIC_DET = os.getenv("TOPIC_DET", "assist/detections")
-TOPIC_ANN = os.getenv("TOPIC_ANN", "assist/cam/annotated")
-TOPIC_ANN_ALT = os.getenv("TOPIC_ANN_ALT", "ntut/ProcessImage")  # annotated image data URL
-TOPIC_ANN_ALT_RAW_ONLY = os.getenv("TOPIC_ANN_ALT_RAW_ONLY", "0") == "1"  # unused but kept for compat
-TOPIC_INFO = os.getenv("TOPIC_INFO", "ntut/ProcessInfo")  # JSON detections passthrough
-TOPIC_INFO_ZH = os.getenv("TOPIC_INFO_ZH", "ntut/ProcessInfoZh")  # Chinese text topic
-TOPIC_INFO_EN = os.getenv("TOPIC_INFO_EN", "ntut/ProcessInfoEn")  # English text topic
-TOPIC_SPEECH_ZH = os.getenv("TOPIC_SPEECH_ZH", "ntut/ProcessSpeechZh")  # nearest object text for TTS (Chinese)
-TOPIC_SPEECH_EN = os.getenv("TOPIC_SPEECH_EN", "ntut/ProcessSpeechEn")  # nearest object text for TTS (English)
-PUBLISH_ANN = os.getenv("PUBLISH_ANN", "0") == "1"
+# Align defaults with existing pipeline topics
+TOPIC_RAW = os.getenv("TOPIC_RAW", "ntut/SourceImage")
+TOPIC_RAW_ESP = os.getenv("TOPIC_RAW_ESP", "ntut/CAM/SourceImage")
+RELAY_RAW_TOPIC = os.getenv("RELAY_RAW_TOPIC", TOPIC_RAW)
+TOPIC_DET = os.getenv("TOPIC_FRUIT_DET", "assist/detections")
+TOPIC_ANN = os.getenv("TOPIC_FRUIT_ANN", "assist/cam/annotated")
+TOPIC_ANN_ALT = os.getenv("TOPIC_FRUIT_ANN_ALT", "ntut/ProcessImage")
+PUBLISH_ANN = os.getenv("PUBLISH_ANN", "1") == "1"
+TOPIC_INFO = os.getenv("TOPIC_FRUIT_INFO", "ntut/ProcessInfo")
+TOPIC_INFO_ZH = os.getenv("TOPIC_FRUIT_INFO_ZH", "ntut/ProcessInfoZh")
+TOPIC_INFO_EN = os.getenv("TOPIC_FRUIT_INFO_EN", "ntut/ProcessInfoEn")
+TOPIC_SPEECH_ZH = os.getenv("TOPIC_FRUIT_SPEECH_ZH", "ntut/ProcessSpeechZh")
+TOPIC_SPEECH_EN = os.getenv("TOPIC_FRUIT_SPEECH_EN", "ntut/ProcessSpeechEn")
 
 MODEL_PATH = os.getenv("YOLO_MODEL", "yolov8n.pt")
-CONF_THRESH = float(os.getenv("CONF_THRESH", "0.25"))
-FOCAL_PX = float(os.getenv("FOCAL_PX", "900"))  # calibrate for your camera
-DEFAULT_HEIGHT_M = float(os.getenv("OBJ_HEIGHT_M", "1.6"))  # default person height
-DIST_MULTIPLIER_ESP = float(os.getenv("DIST_MULTIPLIER_ESP", "0.1"))  # scale distances for ESP32 CAM (divide by 10 by default)
+IMGSZ = int(os.getenv("IMGSZ", "1280"))  # higher imgsz helps small fruit in wide images
+CONF_THRESH = float(os.getenv("CONF_THRESH", "0.1"))  # lower default for fruit
+FOCAL_PX = float(os.getenv("FOCAL_PX", "600"))  # adjust to your camera
+FRUIT_HEIGHT_M = float(os.getenv("FRUIT_HEIGHT_M", "0.08"))  # typical fruit height in meters
+DIST_MULTIPLIER_ESP = float(os.getenv("DIST_MULTIPLIER_ESP", "0.1"))  # ESP32-CAM wide FOV correction
+SPEECH_CONF_MIN = float(os.getenv("SPEECH_CONF_MIN", "0.8"))  # min confidence for speech output
 
 QOS_SUB = 1
 QOS_PUB = 1
 
+FRUIT_CLASSES = {"apple", "banana", "orange", "broccoli", "carrot"}
+CLASS_NAME_ZH = {
+    "apple": "蘋果",
+    "banana": "香蕉",
+    "orange": "橘子",
+    "broccoli": "花椰菜",
+    "carrot": "紅蘿蔔",
+}
+SIDE_ZH = {"left": "左側", "center": "正前", "right": "右側"}
+SIDE_EN = {"left": "left", "center": "center", "right": "right"}
+
 
 def make_jpeg_data_url(b64: str) -> str:
     return f"data:image/jpeg;base64,{b64}"
-
-
-def class_color(name: str) -> Tuple[int, int, int]:
-    palette = [
-        (0, 255, 0),
-        (255, 0, 0),
-        (0, 128, 255),
-        (255, 128, 0),
-        (255, 0, 255),
-        (0, 255, 255),
-        (128, 0, 255),
-        (128, 255, 0),
-        (0, 0, 255),
-        (255, 255, 0),
-    ]
-    h = abs(hash(name))
-    return palette[h % len(palette)]
-
-
-CLASS_NAME_ZH = {
-    "person": "人",
-    "umbrella": "雨傘",
-    "kite": "風箏",
-    "car": "車",
-    "truck": "卡車",
-    "bus": "公車",
-    "train": "火車",
-    "motorcycle": "機車",
-    "bicycle": "腳踏車",
-    "cat": "貓",
-    "dog": "狗",
-    "bird": "鳥",
-    "horse": "馬",
-    "sheep": "羊",
-    "cow": "牛",
-    "bear": "熊",
-    "zebra": "斑馬",
-    "giraffe": "長頸鹿",
-    "traffic light": "紅綠燈",
-    "fire hydrant": "消防栓",
-    "stop sign": "停止標誌",
-    "bench": "長椅",
-    "chair": "椅子",
-    "sofa": "沙發",
-    "bed": "床",
-    "dining table": "餐桌",
-    "potted plant": "盆栽",
-    "tv": "電視",
-    "laptop": "筆電",
-    "mouse": "滑鼠",
-    "keyboard": "鍵盤",
-    "cell phone": "手機",
-    "remote": "遙控器",
-    "microwave": "微波爐",
-    "oven": "烤箱",
-    "toaster": "烤麵包機",
-    "sink": "洗手槽",
-    "refrigerator": "冰箱",
-    "book": "書",
-    "clock": "時鐘",
-    "vase": "花瓶",
-    "scissors": "剪刀",
-    "teddy bear": "泰迪熊",
-    "toothbrush": "牙刷",
-}
-
-SIDE_ZH = {"left": "左側", "center": "正前", "right": "右側"}
-SIDE_EN = {"left": "left", "center": "center", "right": "right"}
 
 
 def estimate_distance_m(bbox: Tuple[int, int, int, int], real_height_m: float, focal_px: float) -> float:
@@ -148,7 +88,7 @@ def side_of_frame(bbox: Tuple[int, int, int, int], img_w: int) -> str:
     return "center"
 
 
-class Detector:
+class FruitDetector:
     def __init__(self):
         self.model = YOLO(MODEL_PATH)
         self.class_names: List[str] = self.model.names
@@ -160,11 +100,10 @@ class Detector:
         self.client.on_message = self.on_message
         print(f"Connecting to MQTT {BROKER}:{PORT} TLS={USE_TLS} user_set={bool(USERNAME)}")
         self.client.connect(BROKER, PORT, keepalive=30)
-        topics = {TOPIC_RAW, TOPIC_RAW_ESP}
-        for t in topics:
+        for t in {TOPIC_RAW, TOPIC_RAW_ESP}:
             if t:
                 self.client.subscribe(t, qos=QOS_SUB)
-        print(f"Detector (YOLOv8) subscribed to {', '.join(sorted(t for t in topics if t))}, publishing detections to {TOPIC_DET}")
+        print(f"Fruit detector subscribed to {TOPIC_RAW} and {TOPIC_RAW_ESP}, publishing to {TOPIC_DET}")
         if PUBLISH_ANN:
             print(f"Annotated frames will be published to {TOPIC_ANN}")
 
@@ -173,12 +112,12 @@ class Detector:
 
     def on_message(self, _cli, _userdata, msg):
         try:
+            print(f"[rx] topic={msg.topic} bytes={len(msg.payload)}")
             raw_bytes = msg.payload
             from_esp = msg.topic == TOPIC_RAW_ESP
             try:
                 raw = json.loads(raw_bytes)
             except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
-                # If payload is binary JPEG (e.g., ESP32) or plain base64 string.
                 if raw_bytes.startswith(b"\xff\xd8"):  # JPEG magic
                     raw = base64.b64encode(raw_bytes).decode("ascii")
                 else:
@@ -195,19 +134,25 @@ class Detector:
                     return
                 payload = raw
             else:
-                print(f"Unsupported payload type {type(raw)}; skipping message")
+                print(f"Unsupported payload type {type(raw)}; skipping")
                 return
+
             frame = self.decode_frame(payload)
             if frame is None:
                 print("Frame decode failed; skipping message")
                 return
+
             dist_scale = DIST_MULTIPLIER_ESP if from_esp else 1.0
             dets, ann = self.detect(frame, dist_scale=dist_scale)
+            if not dets:
+                return
+
             out_msg = {
                 "frame_id": payload.get("frame_id"),
                 "ts": int(time.time() * 1000),
                 "objects": dets,
             }
+            print(f"[det] objects={len(dets)} publish {TOPIC_DET}")
             self.client.publish(TOPIC_DET, json.dumps(out_msg), qos=QOS_PUB)
             if TOPIC_INFO:
                 self.client.publish(TOPIC_INFO, json.dumps(out_msg), qos=QOS_PUB)
@@ -225,23 +170,21 @@ class Detector:
                 speech_en = self.format_nearest(dets, lang="en")
                 if speech_en:
                     self.client.publish(TOPIC_SPEECH_EN, speech_en, qos=QOS_PUB)
+
             if from_esp and RELAY_RAW_TOPIC and RELAY_RAW_TOPIC != msg.topic and "data" in payload:
-                # Forward ESP raw frame to the regular raw topic so downstream flows stay aligned.
                 relay_payload = {"data": payload["data"], "_relay_skip": True}
                 self.client.publish(RELAY_RAW_TOPIC, json.dumps(relay_payload), qos=QOS_PUB)
-            if ann is not None:
+
+            if ann is not None and PUBLISH_ANN:
                 ann_payload = {
                     "ts": out_msg["ts"],
                     "frame_id": out_msg["frame_id"],
                     "encoding": "jpg",
                     "data": base64.b64encode(ann).decode("ascii"),
                 }
-                if PUBLISH_ANN:
-                    self.client.publish(TOPIC_ANN, json.dumps(ann_payload), qos=QOS_PUB)
+                self.client.publish(TOPIC_ANN, json.dumps(ann_payload), qos=QOS_PUB)
                 if TOPIC_ANN_ALT:
-                    data_url = make_jpeg_data_url(ann_payload["data"])
-                    # ProcessImage sends data URL only
-                    self.client.publish(TOPIC_ANN_ALT, data_url, qos=QOS_PUB)
+                    self.client.publish(TOPIC_ANN_ALT, make_jpeg_data_url(ann_payload["data"]), qos=QOS_PUB)
         except Exception as e:
             print(f"Error handling frame: {e}")
 
@@ -258,43 +201,44 @@ class Detector:
 
     def detect(self, frame, dist_scale: float = 1.0):
         h, w = frame.shape[:2]
-        result = self.model(frame, verbose=False)[0]
+        result = self.model(frame, verbose=False, conf=CONF_THRESH, imgsz=IMGSZ)[0]
         detections = []
-
         for box in result.boxes:
             conf = float(box.conf)
             if conf < CONF_THRESH:
                 continue
             cls_id = int(box.cls)
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int).tolist()
-            bbox = [x1, y1, x2, y2]
             cls_name = self.class_names.get(cls_id, str(cls_id)) if isinstance(self.class_names, dict) else (
                 self.class_names[cls_id] if cls_id < len(self.class_names) else str(cls_id)
             )
+            if cls_name not in FRUIT_CLASSES:
+                continue
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int).tolist()
+            bbox = [x1, y1, x2, y2]
             pix_h = max(1, y2 - y1)
-            dist_m = estimate_distance_m(bbox, DEFAULT_HEIGHT_M, FOCAL_PX) * dist_scale
-            color = class_color(cls_name)
+            dist_m = estimate_distance_m(bbox, FRUIT_HEIGHT_M, FOCAL_PX) * dist_scale
             detections.append(
                 {
                     "id": cls_name,
+                    "id_zh": CLASS_NAME_ZH.get(cls_name, cls_name),
                     "conf": round(conf, 3),
                     "bbox": bbox,
                     "pix_h": pix_h,
                     "dist_m": round(dist_m, 2),
                     "side": side_of_frame(bbox, w),
-                    "color_bgr": color,
                 }
             )
-
         annotated = self.draw_annotations(frame, detections)
+        if not detections:
+            print("[det] no fruit detected")
         return detections, annotated
 
     def draw_annotations(self, frame, detections):
         for det in detections:
             x1, y1, x2, y2 = det["bbox"]
-            color = det.get("color_bgr", (0, 255, 0))
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            color = (0, 255, 0)
             label = f"{det['id']} {det['conf']:.2f} {det['dist_m']}m"
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, label, (x1, max(15, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
         ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
         if not ok:
@@ -303,7 +247,7 @@ class Detector:
 
     def format_text(self, detections: List[dict], lang: str) -> str:
         if not detections:
-            return "沒有偵測到物件" if lang == "zh" else "No objects detected"
+            return "沒有偵測到水果" if lang == "zh" else "No fruits detected"
         parts = []
         for det in detections:
             cls = det["id"]
@@ -321,7 +265,11 @@ class Detector:
     def format_nearest(self, detections: List[dict], lang: str) -> str:
         if not detections:
             return None
-        nearest = min(detections, key=lambda d: d.get("dist_m", 1e9))
+        # Only consider high-confidence detections for speech
+        strong = [d for d in detections if d.get("conf", 0) >= SPEECH_CONF_MIN]
+        if not strong:
+            return None
+        nearest = min(strong, key=lambda d: d.get("dist_m", 1e9))
         cls = nearest["id"]
         cls_zh = CLASS_NAME_ZH.get(cls, cls)
         side_zh = SIDE_ZH.get(nearest.get("side"), nearest.get("side", ""))
@@ -342,4 +290,4 @@ class Detector:
 
 
 if __name__ == "__main__":
-    Detector().run()
+    FruitDetector().run()
